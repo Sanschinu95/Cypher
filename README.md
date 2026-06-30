@@ -88,5 +88,3 @@ It calculates this probability for *every* feature (typing speed, mouse pauses, 
 * **Weakness:** Naive Bayes assumes features are "independent" (e.g., it assumes your typing speed doesn't affect your mouse speed). In reality, these are often correlated, but for a lightweight engine, this assumption is acceptable.
 * **Weakness:** The threshold `isAuthentic = confidence > 0.3` is static. In a production environment, this threshold usually needs to be dynamic based on the risk level of the action.
 
-### Next Step
-Would you like me to write a **React Hook** (e.g., `useBehavioralAuth`) that wraps this class logic, automatically attaching the event listeners to the window so you can simply drop it into your login form?
