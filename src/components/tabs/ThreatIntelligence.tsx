@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useSessionLog } from '@/hooks/useSessionLog';
 import type { SessionEvent, SessionEventType } from '@/context/SessionLogContext';
+import { readIncidents, type SecurityIncident } from '@/lib/incidentStore';
 import {
   FEATURE_KEYS,
   FEATURE_LABELS,
@@ -43,6 +44,7 @@ export const ThreatIntelligence: React.FC<Props> = ({ latestFeatures }) => {
       <div className="grid lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
           <SessionFeed />
+          <IncidentLog />
           <GraphView />
         </div>
         <div className="space-y-6">
@@ -51,6 +53,85 @@ export const ThreatIntelligence: React.FC<Props> = ({ latestFeatures }) => {
         </div>
       </div>
     </div>
+  );
+};
+
+// Persisted RED-verdict incidents (device snapshot + geolocation). Re-reads on
+// every render — the session feed's event stream triggers renders whenever a
+// new incident is recorded.
+const IncidentLog: React.FC = () => {
+  const incidents = readIncidents();
+
+  const formatLocation = (loc: SecurityIncident['location']): string => {
+    if (typeof loc === 'string') {
+      return loc === 'permission-denied'
+        ? 'location permission denied'
+        : loc === 'timeout'
+          ? 'location timed out'
+          : 'location unavailable';
+    }
+    return `${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)} · ±${Math.round(loc.accuracyMeters)}m`;
+  };
+
+  return (
+    <Card className="bg-card border-border shadow-neural">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              Security incidents
+            </CardTitle>
+            <CardDescription>
+              High-risk verdicts with device + location snapshots. Stored locally until an online
+              reporting service is connected.
+            </CardDescription>
+          </div>
+          <Badge variant={incidents.length > 0 ? 'destructive' : 'outline'} className="text-[10px]">
+            {incidents.length} recorded
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {incidents.length === 0 ? (
+          <div className="text-sm text-muted-foreground py-4 text-center">
+            No incidents. RED-tier verdicts will appear here automatically.
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {[...incidents].reverse().slice(0, 8).map((inc) => (
+              <li
+                key={inc.id}
+                className="rounded-md border border-destructive/30 bg-destructive/5 p-3 space-y-1.5"
+              >
+                <div className="flex items-center justify-between font-mono text-xs">
+                  <span className="text-destructive font-semibold">
+                    {(inc.confidence * 100).toFixed(0)}% · {inc.meanZ.toFixed(1)}σ deviation
+                  </span>
+                  <span className="text-muted-foreground">
+                    {new Date(inc.timestamp).toLocaleString()}
+                  </span>
+                </div>
+                <div className="text-xs text-foreground/90">
+                  <span className="text-muted-foreground">Location: </span>
+                  {formatLocation(inc.location)}
+                </div>
+                <div className="text-xs text-foreground/90">
+                  <span className="text-muted-foreground">Device: </span>
+                  {inc.device.platform} · {inc.device.screen} · {inc.device.timezone}
+                </div>
+                {inc.anomalousFeatures.length > 0 && (
+                  <div className="text-xs text-destructive/90">
+                    <span className="text-muted-foreground">Anomalies: </span>
+                    {inc.anomalousFeatures.join(', ')}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
   );
 };
 

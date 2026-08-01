@@ -9,12 +9,16 @@ import { ReferenceCard } from '@/components/ReferenceCard';
 import { TrainingDashboard } from '@/components/TrainingDashboard';
 import { PostAuthGateway } from '@/components/PostAuthGateway';
 import { TabNavigation } from '@/components/TabNavigation';
+import { CaptchaGate, type GateToken } from '@/components/CaptchaGate';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { toast } from '@/hooks/use-toast';
 import { Brain, Shield, Zap, Info } from 'lucide-react';
 import { useSessionLog } from '@/hooks/useSessionLog';
+import { scoreConfidence } from '@/lib/confidenceScoring';
+import { readStoredModel, FEATURE_LABELS } from '@/lib/modelAccess';
+import { recordIncident, clearIncidents } from '@/lib/incidentStore';
 
 type AppMode = 'welcome' | 'training' | 'testing';
 
@@ -34,8 +38,13 @@ const Index = () => {
   const [latestFeatures, setLatestFeatures] = useState<BehavioralFeatures | null>(null);
   const [isFormVisible, setIsFormVisible] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('auth');
+  const [gateToken, setGateToken] = useState<GateToken | null>(null);
   const lastRedirectedFor = useRef<string | null>(null);
   const { addEvent } = useSessionLog();
+
+  // A gate token is only usable once and expires after its TTL. Consuming or
+  // expiring the token forces a fresh proof-of-work solve before the next test.
+  const isGateValid = gateToken !== null && Date.now() < gateToken.expiresAt;
 
   // Auto-route to the Login Hardening tab whenever a fresh test scores high-risk.
   useEffect(() => {
@@ -92,16 +101,42 @@ const Index = () => {
   };
 
   const handleAuthenticationTest = (_formData: unknown) => {
+    if (!isGateValid) {
+      addEvent('anomaly', 'Test submission blocked — bot gate token missing or expired.');
+      toast({
+        title: 'Bot check required',
+        description: 'Solve the bot check above before running an authentication test.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    // Consume the token so the next test requires a fresh solve.
+    setGateToken(null);
+
     const sessionId = generateSessionId();
     const behavioralData = collector.getCollectedData(sessionId);
 
-    const result = authenticator.authenticate(behavioralData);
+    // Engine call kept for comparison logging only — its confidence formula
+    // (exp(avgLogPDF/5)) is uncalibrated and structurally caps genuine users
+    // near ~0.45. The calibrated z-score scorer below is the decision-maker.
+    const engineResult = authenticator.authenticate(behavioralData);
     const features = authenticator.extractFeatures(behavioralData);
     setLatestFeatures(features);
 
+    const calibrated = scoreConfidence(features, readStoredModel());
+    const confidence = calibrated.confidence;
+    const isAuthentic = confidence >= 0.7;
+
+    addEvent(
+      'info',
+      `Score calibration — engine raw ${(engineResult.confidence * 100).toFixed(0)}% → ` +
+      `calibrated ${(confidence * 100).toFixed(0)}% (mean deviation ${calibrated.meanZ.toFixed(2)}σ ` +
+      `across ${calibrated.usedFeatures} features)`
+    );
+
     const authResult: AuthenticationResult = {
-      isAuthentic: result.isAuthentic,
-      confidence: result.confidence,
+      isAuthentic,
+      confidence,
       timestamp: Date.now(),
       sessionId,
     };
@@ -110,10 +145,32 @@ const Index = () => {
     collector.reset();
     setIsFormVisible(false);
 
+    // RED verdict → snapshot device + location and persist the incident locally.
+    if (confidence < 0.3) {
+      const anomalous = calibrated.perFeature
+        .filter((f) => !f.dropped && f.z > 2)
+        .map((f) => `${FEATURE_LABELS[f.key]} (+${f.z.toFixed(1)}σ)`);
+      recordIncident({ confidence, meanZ: calibrated.meanZ, anomalousFeatures: anomalous })
+        .then((incident) => {
+          const loc =
+            typeof incident.location === 'string'
+              ? incident.location
+              : `${incident.location.latitude.toFixed(4)}, ${incident.location.longitude.toFixed(4)} (±${Math.round(incident.location.accuracyMeters)}m)`;
+          addEvent('lockout', `Security incident recorded — location: ${loc}`);
+        })
+        .catch(() => {
+          addEvent('lockout', 'Security incident recorded — location capture failed');
+        });
+    }
+
     toast({
-      title: result.isAuthentic ? 'Authentication Successful' : 'Authentication Failed',
-      description: `Confidence: ${(result.confidence * 100).toFixed(1)}%`,
-      variant: result.isAuthentic ? 'default' : 'destructive',
+      title: isAuthentic
+        ? 'Authentication Successful'
+        : confidence >= 0.3
+          ? 'Identity Uncertain'
+          : 'Authentication Failed',
+      description: `Confidence: ${(confidence * 100).toFixed(1)}%`,
+      variant: isAuthentic ? 'default' : 'destructive',
     });
   };
 
@@ -132,12 +189,14 @@ const Index = () => {
     setMode('testing');
     collector.reset();
     setIsFormVisible(true);
+    setGateToken(null);
     addEvent('system', 'Testing mode started.');
   };
 
   const handleNewTest = () => {
     collector.reset();
     setIsFormVisible(true);
+    setGateToken(null);
   };
 
   const handleReset = () => {
@@ -148,7 +207,9 @@ const Index = () => {
     setAuthResults([]);
     setLatestFeatures(null);
     setIsFormVisible(false);
-    addEvent('system', 'System reset — all training and history cleared.');
+    setGateToken(null);
+    clearIncidents();
+    addEvent('system', 'System reset — all training, history and incidents cleared.');
     toast({
       title: 'System Reset',
       description: 'All training data and results have been cleared.',
@@ -168,7 +229,11 @@ const Index = () => {
         />
       )}
 
-      {isFormVisible && (
+      {isFormVisible && !isGateValid && (
+        <CaptchaGate onVerified={setGateToken} />
+      )}
+
+      {isFormVisible && isGateValid && (
         <div className="grid lg:grid-cols-3 gap-8 items-start">
           <div className="lg:order-2">
             <ReferenceCard />
